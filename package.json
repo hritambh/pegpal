@@ -1,0 +1,20 @@
+{
+  "name": "pegpal",
+  "private": true,
+  "packageManager": "bun@1.4.2",
+  "workspaces": ["packages/*", "apps/*"],
+  "engines": { "node": ">=22" },
+  "trustedDependencies": ["@prisma/client", "@prisma/engines", "prisma", "@tailwindcss/oxide", "sharp", "unrs-resolver", "@nestjs/core"],
+  "scripts": {
+    "build": "bun run --filter @pegpal/shared build && bun run --filter @pegpal/api build && bun run --filter @pegpal/web build",
+    "build:shared": "bun run --filter @pegpal/shared build",
+    "dev:api": "bun run --filter @pegpal/api dev",
+    "dev:web": "bun run --filter @pegpal/web dev",
+    "lint": "bun run --filter '*' lint",
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun run --filter '*' test",
+    "db:up": "docker compose up -d postgres",
+    "db:migrate": "bun run --filter @pegpal/api prisma:migrate",
+    "db:seed": "bun run --filter @pegpal/api prisma:seed"
+  }
+}

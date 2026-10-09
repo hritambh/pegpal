@@ -1,0 +1,11 @@
+# Backend account: send commands, read events/presence for every machine.
+user pegpal-backend
+topic write pegpal/v1/+/cmd
+topic read pegpal/v1/+/evt
+topic read pegpal/v1/+/online
+
+# One controller account per machine, using the machine id as username.
+# A controller can only read its own commands and write its own events.
+pattern read pegpal/v1/%u/cmd
+pattern write pegpal/v1/%u/evt
+pattern write pegpal/v1/%u/online

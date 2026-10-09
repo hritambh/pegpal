@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+firmware/.pio/
+firmware/include/secrets.h
+next-env.d.ts
+infra/mosquitto/certs/*
+!infra/mosquitto/certs/.gitkeep
+infra/mosquitto/passwd

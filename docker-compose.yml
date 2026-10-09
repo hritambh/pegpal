@@ -1,0 +1,61 @@
+name: pegpal
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: pegpal
+      POSTGRES_PASSWORD: pegpal_dev_only
+      POSTGRES_DB: pegpal
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pegpal -d pegpal"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file: apps/api/.env
+    environment:
+      DATABASE_URL: postgresql://pegpal:pegpal_dev_only@postgres:5432/pegpal?schema=public
+      PORT: "3001"
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      API_INTERNAL_URL: http://api:3001
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+  # Only needed for HARDWARE_MODE=esp32. See docs/hardware-protocol.md.
+  mosquitto:
+    profiles: ["hardware"]
+    image: eclipse-mosquitto:2.0.20
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./infra/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./infra/mosquitto/certs:/mosquitto/certs:ro
+      - ./infra/mosquitto/passwd:/mosquitto/config/passwd:ro
+      - ./infra/mosquitto/acl:/mosquitto/config/acl:ro
+
+volumes:
+  pgdata:

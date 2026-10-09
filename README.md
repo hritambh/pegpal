@@ -1,312 +1,187 @@
 # PegPal
 
-A QR-based, self-service drink dispensing machine. The machine holds 10 liquid reservoirs, each with its own peristaltic pump. Customers scan a QR code on the machine, pick liquids and quantities on their phone, confirm the order, and watch it dispense in real time. The machine has no touchscreen.
+**A QR-ordered, self-service drink dispensing machine.** It has ten liquids and ten pumps, an ESP32 controller and a load cell, and no touchscreen. Customers scan a QR code, choose liquids and quantities on their phone, confirm, and watch it pour live.
 
-> **Status:** MVP in planning. This README describes the target design and requirements. Setup instructions will be added as each phase lands.
+This repository holds a working MVP: a NestJS backend, a mobile-first Next.js web app, ESP32 firmware, and a **hardware simulator**. With the simulator, the whole system runs and can be tested without the physical machine.
 
----
-
-## Table of contents
-
-- [Hardware overview](#hardware-overview)
-- [Technology stack](#technology-stack)
-- [Repository layout (planned)](#repository-layout-planned)
-- [Customer experience](#customer-experience)
-- [Order state machine](#order-state-machine)
-- [Backend modules](#backend-modules)
-- [Data model](#data-model)
-- [API](#api)
-- [Hardware abstraction and protocol](#hardware-abstraction-and-protocol)
-- [Dispensing accuracy](#dispensing-accuracy)
-- [Calibration](#calibration)
-- [Safety](#safety)
-- [Security](#security)
-- [Admin dashboard](#admin-dashboard)
-- [Development roadmap](#development-roadmap)
-- [Testing](#testing)
-- [Acceptance criteria](#acceptance-criteria)
-- [Compliance notice](#compliance-notice)
+> **Status: MVP, mock hardware.** Everything runs end to end against the simulator. The ESP32 adapter and firmware are implemented behind an explicit feature flag but have **not been tested on physical hardware**. Read [Safety](docs/safety.md) before connecting pumps.
 
 ---
 
-## Hardware overview
+## Contents
 
-| Component | Purpose |
+1. [Features](#features)
+2. [Quick start](#quick-start)
+3. [How it works](#how-it-works)
+4. [Repository layout](#repository-layout)
+5. [Documentation](#documentation)
+6. [Development](#development)
+7. [Acceptance criteria](#acceptance-criteria)
+8. [Safety and compliance](#safety-and-compliance)
+
+---
+
+## Features
+
+### For customers
+
+- **Machine page** (`/machine/<ID>`) shows the machine's availability (Available, Busy, Offline or Out of Service) and the configured liquids.
+- **Choose several liquids** with mL steppers. The client checks each liquid's min and max, the order's total volume limit and the item count, and shows an estimated price.
+- **Order review** shows the price calculated by the server, with confirm and cancel buttons and a clear test-mode payment banner.
+- **Live progress** over Server-Sent Events, falling back to polling. It shows the current ingredient, its progress, what's done and what's left, and an honest verification label for every item.
+
+### Safety core
+
+- A strict state machine. Every transition is a single guarded SQL update.
+- **Idempotent** order creation and confirmation. Retries never cause a second dispense.
+- **One active order per machine.** The machine is reserved atomically, and a partial unique index backs that up in the database.
+- **Persist before send.** Every controller command gets its sequence number and is written to the database before it's transmitted.
+- **Uncertain outcomes are never guessed or retried.** The backend sends STOP, marks the item `UNKNOWN`, and locks the machine for an operator.
+- Cancelling is only treated as successful once the controller has confirmed every pump is off.
+- After a restart, nothing resumes on its own.
+- Limits apply on the server *and* separately in the firmware. Commands use logical channels only, never GPIO numbers.
+
+### Hardware
+
+- **`MockHardwareAdapter`** simulates flow rates that differ per channel, progress reports, pump faults, lost ACKs, hung steps, disconnects, the e-stop, and unstable or missing scales. Every figure it reports is labelled simulated.
+- **`Esp32HardwareAdapter`** talks MQTT over TLS, with per-machine HMAC keys that can be revoked and replay protection.
+- **ESP32 firmware** (Arduino framework) has these protections:
+  - safe boot with every pump off
+  - an e-stop latch that can only be cleared locally
+  - a watchdog
+  - a local stop when the network link is lost
+  - HX711 tare, filtering, stability and fault detection
+
+### Dispensing accuracy
+
+- Each liquid has its own calibration profile.
+- There are two strategies: **timed** (a calibrated flow rate) and **weight-based** (load cell, density and a cutoff margin).
+- Every delivered quantity is labelled with how it was verified:
+
+| Label | Meaning |
 |---|---|
-| 10 liquid reservoirs | Ingredient storage |
-| 10 peristaltic pumps + motor drivers | One independently controlled pump per liquid |
-| ESP32 | Machine controller |
-| Load cell + HX711 amplifier | Measures mass added to the glass |
-| Dispensing nozzle and glass platform | Output |
-| Physical emergency-stop | Cuts motor power locally, independent of software |
-| QR code | Opens the customer web app for that machine |
+| `SIMULATED` | produced by the mock; no physical measurement |
+| `ESTIMATED` | worked out from pump runtime and the calibrated flow rate |
+| `MASS_DELTA` | inferred from the change in total glass mass, using the configured density |
+| `UNVERIFIED` | no trustworthy evidence |
 
-Physical details that aren't known yet (pump flow rates, driver part numbers, load-cell capacity) are exposed as configurable limits behind defined interfaces. None of them are hardcoded.
+### Operators (`/admin`)
 
-## Technology stack
+- Machine status, the current order, recent orders, and safety and error events.
+- A badge showing whether the hardware is MOCK or PHYSICAL.
+- Liquid configuration and pump-to-liquid mapping.
+- Calibration: run a bounded test dispense, enter the measured volume and mass, compute the flow rate and density, apply it, and review history and validation error.
+- A simulator fault panel in mock mode.
+- Software stop of all pumps, and clearing a fault once a fresh status has been checked.
+- Issuing and revoking machine credentials.
 
-**Frontend:** Next.js, TypeScript, React, Tailwind CSS. Mobile-first.
+## Quick start
 
-**Backend:** NestJS (TypeScript), REST APIs, WebSocket/SSE for live order status, PostgreSQL, Prisma ORM, strict DTO validation, structured logging, centralized error handling.
-
-**Firmware:** ESP32 on the Arduino framework (via PlatformIO). Arduino has mature HX711 and MQTT/TLS libraries and is quicker to iterate on for an MVP. FreeRTOS is still available underneath for watchdog and task control. We can move to ESP-IDF later if we need finer control.
-
-**Dev/deploy:** Docker Compose (app + PostgreSQL), environment-based configuration, automated tests.
-
-## Repository layout (planned)
-
-```
-pegpal/
-├── apps/
-│   ├── web/            # Next.js customer app + admin dashboard
-│   └── api/            # NestJS backend
-├── firmware/           # ESP32 firmware (PlatformIO, Arduino framework)
-├── packages/
-│   └── shared/         # Shared types: order states, protocol messages, DTO contracts
-├── docs/               # Architecture, protocol spec, safety & wiring notes
-├── docker-compose.yml
-└── README.md
-```
-
-## Customer experience
-
-1. **Machine landing:** `/machine/:machineId` (e.g. `/machine/MACHINE_001`). The backend validates the machine ID. The page shows the machine name, ID, availability (Available / Busy / Offline / Out of Service), the available liquids, and a **Start Order** button. No admin features are exposed.
-2. **Liquid selection:** shows all configured liquids (not hardcoded), each with name, optional image, price per mL, availability, mL quantity selector, and min/max limits. Customers can pick several liquids. The page shows selected items, per-item quantities, total volume, and estimated price, with edit and remove actions. Invalid quantities are rejected on both client and server.
-3. **Order review:** shows machine ID, items, total volume, total price, and confirm/cancel actions.
-4. **Dispensing progress:** shows order ID, current ingredient, target quantity, progress, completed and remaining ingredients, machine status, and the final success or failure message.
-
-### Payment modes
-
-| Mode | Behavior |
-|---|---|
-| `TEST_MODE` | Simulated payment or manual developer confirmation. Never presented as a real payment. |
-| `PAYMENT_DISABLED` | No payment processing. For controlled internal testing only. |
-
-No real payment provider is integrated until one is explicitly requested. Card details are never stored.
-
-## Order state machine
-
-```
-CREATED ──► AUTHORIZED ──► QUEUED ──► DISPENSING ──► COMPLETED
-   │            │            │            │
-   └────────────┴────────────┴────────────┴──► CANCELLED  (only after hardware confirms stop)
-                             │            ├──► FAILED
-                             └────────────┴──► SAFETY_STOPPED
-```
-
-- Only the transitions shown above are allowed. Any other transition is rejected and logged.
-- `COMPLETED`, `FAILED`, `CANCELLED`, and `SAFETY_STOPPED` are terminal.
-- An ingredient counts as dispensed only after a hardware acknowledgement **and** completion evidence. Sending the command is not enough.
-- If the delivered amount can't be verified, the item is marked **unverified** rather than reported as exact.
-
-## Backend modules
-
-`MachinesModule` · `LiquidsModule` · `OrdersModule` · `DispensingModule` · `HardwareModule` · `AdminModule` · `HealthModule`
-
-## Data model
-
-| Model | Key fields |
-|---|---|
-| **Machine** | id, name, publicId, status, hardwareConnectionStatus, createdAt, updatedAt |
-| **Liquid** | id, name, pumpChannel, densityGPerMl (nullable), calibrationProfile, minMl, maxMl, pricePerMl, active, remainingStockMl, createdAt, updatedAt |
-| **Order** | id, machineId, status, totalVolumeMl, totalPrice, idempotencyKey (unique), failureReason, createdAt, updatedAt |
-| **OrderItem** | id, orderId, liquidId, requestedMl, targetMassG, measuredMassG, dispensingStatus, verification (`MEASURED` / `ESTIMATED` / `UNVERIFIED`), startedAt, completedAt |
-| **DispensingEvent** | id, orderId, type, pumpChannel/liquidId, payload (JSON), timestamp |
-| **CalibrationRecord** | id, liquidId, requestedMl, measuredMl, densityGPerMl, computedFlowRate, simulated (bool), operator, createdAt |
-| **HardwareCommand** | id (command ID), machineId, orderId, sequence, payload, ackAt, outcome, createdAt |
-
-Machine reservation is atomic: a single active order per machine, enforced at the database level.
-
-## API
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/machines/:machineId` | Public machine info and availability |
-| GET | `/api/machines/:machineId/liquids` | Active liquids with pricing and limits |
-| POST | `/api/orders` | Create an order (requires `Idempotency-Key` header) |
-| GET | `/api/orders/:orderId` | Order details and status |
-| POST | `/api/orders/:orderId/confirm` | Authorize and queue (idempotent) |
-| POST | `/api/orders/:orderId/cancel` | Request cancellation (resolves once hardware confirms stop) |
-| GET | `/api/orders/:orderId/events` | Live status stream (SSE) |
-| GET | `/api/health` | Liveness/readiness |
-| * | `/api/admin/...` | Authenticated admin, calibration, and machine control |
-
-The server always does the following:
-- Validates that the machine exists and is operational.
-- Validates every liquid and quantity.
-- Calculates prices itself.
-- Enforces safety limits.
-- Persists state before any hardware command is sent.
-- Handles timeouts and duplicate messages.
-- Reconciles state when a controller reconnects.
-- Never auto-resumes an interrupted dispense.
-
-## Hardware abstraction and protocol
-
-```ts
-interface HardwareAdapter {
-  dispense(cmd: DispenseCommand): Promise<CommandAck>;
-  stop(machineId: string, reason: string): Promise<CommandAck>;
-  tare(machineId: string): Promise<TareResult>;
-  getStatus(machineId: string): Promise<MachineHardwareStatus>;
-  onEvent(handler: (e: HardwareEvent) => void): void;
-}
-```
-
-- **`MockHardwareAdapter`** (default): simulates pump start/stop, per-liquid flow rates, progress, completion, sensor readings, pump failures, disconnections, and e-stop events. Flow rates and faults are configurable. Simulated readings are always labeled as simulated.
-- **`Esp32HardwareAdapter`**: off by default. Enabled with `HARDWARE_MODE=esp32` once the hardware is configured and tested.
-
-### Transport
-
-MQTT over TLS with per-machine credentials that can be revoked. Each ESP32 subscribes to `pegpal/{machineId}/cmd` and publishes on `pegpal/{machineId}/evt`.
-
-### Messages
-
-```json
-// Command (backend → ESP32)
-{
-  "commandId": "uuid",
-  "machineId": "MACHINE_001",
-  "orderId": "uuid",
-  "seq": 42,
-  "type": "DISPENSE",
-  "channel": 3,
-  "targetMl": 30,
-  "targetMassG": 30.6,
-  "maxDurationMs": 20000
-}
-
-// Event (ESP32 → backend)
-{
-  "commandId": "uuid",
-  "machineId": "MACHINE_001",
-  "seq": 42,
-  "type": "ACK | PROGRESS | DONE | FAILED | ESTOP",
-  "measuredMassG": 30.1,
-  "verification": "MEASURED | ESTIMATED | UNVERIFIED",
-  "error": null
-}
-```
-
-- The firmware deduplicates by `commandId`. A retried command never dispenses twice.
-- `channel` is a logical index from 0 to 9. Remote clients can never supply GPIO numbers.
-- The firmware enforces its own per-channel limits and max runtime, separately from the server.
-- On connectivity loss, the firmware stops all pumps locally.
-- An uncertain outcome requires reconciliation or operator action. It is never replayed automatically.
-
-## Dispensing accuracy
-
-Running a pump for a fixed time does not reliably deliver a fixed volume. Each liquid has its own viscosity and density, so each one gets its own calibration profile.
-
-**Strategy A: calibrated pump timing**
-- Runtime is derived from the liquid's measured flow rate and capped at a maximum.
-- Results are reported as **estimated**.
-
-**Strategy B: weight-based (load cell + HX711)**
-- Tare the platform only after a stable reading.
-- Convert target volume to target mass using density.
-- Stop early by a configurable cutoff margin to allow for liquid that keeps flowing after the pump stops.
-- Filter readings and detect instability, unexpected weight changes, and sensor faults.
-
-The load cell measures the total mass in the glass. Each ingredient's mass is the delta from the previous stable reading. That is not an independent volume measurement, and the order status and logs say so.
-
-## Calibration
-
-Admin-only UI and API. An operator can:
-- Select a liquid or channel and run a bounded test dispense.
-- Enter the actual volume collected (graduated cylinder) and the measured density.
-- Compute and save a calibrated flow rate.
-- Review calibration history and compare requested vs. measured quantities.
-
-In mock mode, calibration data is simulated and labeled as such.
-
-## Safety
-
-This is a physical device, not just a web app.
-
-- Quantity limits on the server **and** independently in firmware.
-- Per-pump maximum runtime and maximum order duration.
-- Hardware watchdog. Safe boot with all pumps off.
-- Pumps shut down on critical faults.
-- Interrupted dispenses never restart automatically.
-- **The emergency stop is a physical circuit** that cuts motor power. It works without the backend, Wi-Fi, or internet, and software cannot override it.
-- Audit logs cover every dispensing command and safety event.
-
-Electrical safety cannot depend on software alone. A wiring and safety document (`docs/safety.md`) will cover the e-stop circuit, motor power isolation, fusing, and electrical protection.
-
-## Security
-
-- Admin authentication. Calibration and machine control require authorization.
-- Rate limiting and strict input validation.
-- Secrets come from environment variables only. Production secrets are never hardcoded.
-- Machine credentials are per-device and can be revoked.
-- No unauthenticated pump-control endpoint.
-- Idempotency keys and command sequence numbers prevent duplicates and replays.
-- Minimal customer data collection.
-- The QR code contains only the public machine ID, never credentials.
-
-## Admin dashboard
-
-The dashboard is simple and authenticated. It shows:
-- Machine status and current order
-- Recent orders
-- Liquid configuration and pump mapping
-- Calibration profiles
-- Dispensing logs
-- Error and safety events
-- A **MOCK / PHYSICAL** hardware mode indicator
-
-## Development roadmap
-
-1. Inspect the repo and propose the architecture
-2. Schema, state machine, API contracts, hardware protocol, safety assumptions
-3. Backend and database migrations
-4. Mobile-first customer web app
-5. Mock hardware and simulated dispensing
-6. Live progress, cancellation, idempotency, fault scenarios
-7. Admin dashboard and calibration tools
-8. ESP32 firmware and real adapter (behind a feature flag)
-9. Tests, Docker Compose, documentation
-
-Each phase ends with tests, lint, and type-check passing.
-
-## Testing
-
-Planned automated coverage:
-- Quantity, density, and mass conversion
-- Calibration and flow-rate calculations
-- Duplicate order requests and concurrent orders on one machine
-- Invalid state transitions
-- Hardware timeouts, emergency stop, and controller disconnection
-- Recovery after backend restart
-- Failure partway through an order
-- Missing or incorrect sensor readings
-
-## Getting started
-
-_Coming in Phase 9._ The target workflow:
+Prerequisites: **Bun 1.4**, **Node 22**, **Docker**.
 
 ```bash
-cp .env.example .env          # configure secrets, HARDWARE_MODE=mock, PAYMENT_MODE=TEST_MODE
-docker compose up -d          # PostgreSQL + api + web
-# open http://localhost:3000/machine/MACHINE_001
+bun install
+bun run db:up                                   # Postgres on :5433
+cp apps/api/.env.example apps/api/.env          # then: MACHINE_SECRET_ENCRYPTION_KEY=$(openssl rand -base64 32)
+bun run build:shared
+bun run --cwd apps/api prisma:generate
+bun run db:migrate && bun run db:seed
+bun run dev:api                                 # terminal 1 → http://localhost:3001/api/health
+bun run dev:web                                 # terminal 2 → http://localhost:3000
 ```
+
+| Open | |
+|---|---|
+| http://localhost:3000/machine/MACHINE_001 | customer flow (what the QR code links to) |
+| http://localhost:3000/admin | operator dashboard. Log in as `operator` / `pegpal-dev-password` (dev only). |
+
+To run the full stack in Docker, use `docker compose --profile app up --build`. More options are in [Getting started](docs/getting-started.md).
+
+## How it works
+
+```
+Phone ──QR──► Next.js (/machine/ID) ──/api──► NestJS ──► PostgreSQL
+                    ▲                            │
+                    └──────── SSE progress ──────┤
+                                                 ▼
+                                   HardwareAdapter: Mock | ESP32 (MQTT/TLS, HMAC)
+                                                 ▼
+                                   ESP32 ─► 10 pumps · HX711 load cell · e-stop
+```
+
+An order moves through these states:
+
+```
+CREATED ─confirm─► AUTHORIZED ─► QUEUED ─► DISPENSING ─► COMPLETED
+   └─cancel/expire─► CANCELLED      └─► FAILED · CANCELLED (after a confirmed stop) · SAFETY_STOPPED
+```
+
+[Architecture](docs/architecture.md) and the [state machine](docs/state-machine.md) explain the details.
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `apps/api` | NestJS backend: Machines, Liquids, Orders, Dispensing, Hardware, Admin and Health modules, plus the Prisma schema, migrations, seed and tests |
+| `apps/web` | Next.js 15 + Tailwind 4 customer and operator UI |
+| `packages/shared` | state machine, unit and calibration math, protocol and API types shared by the API and the web app |
+| `firmware` | ESP32 firmware (PlatformIO, Arduino framework) |
+| `infra` | Postgres init, Mosquitto TLS and ACL config |
+| `docs` | documentation (below) |
+
+## Documentation
+
+| | |
+|---|---|
+| [Getting started](docs/getting-started.md) | setup, configuration, troubleshooting |
+| [Architecture](docs/architecture.md) | components, modules, runtime flow, design decisions |
+| [State machine](docs/state-machine.md) | statuses, legal transitions, recovery |
+| [HTTP API](docs/api.md) | endpoints, errors, idempotency, SSE |
+| [Data model](docs/data-model.md) | tables and constraints |
+| [Controller protocol](docs/hardware-protocol.md) | MQTT topics, signed envelopes, commands and events, retry and replay rules |
+| [Dispensing & calibration](docs/dispensing-and-calibration.md) | accuracy, evidence levels, calibration procedure |
+| [Safety](docs/safety.md) | e-stop circuit, motor power, fusing, compliance |
+| [Security](docs/security.md) | threat model, controls, production checklist |
+| [Operations](docs/operations.md) | runbook for faults, e-stops, restarts and credentials |
+| [Testing](docs/testing.md) | how to run the tests, with a map from requirements to tests |
+| [Firmware](firmware/README.md) | build, flash, provision, bench test |
+
+## Development
+
+| Command | |
+|---|---|
+| `bun run test` | all tests: shared, API unit and integration, web |
+| `bun run lint` · `bun run typecheck` | every workspace |
+| `bun run --cwd apps/api test:integration` | API integration tests on real Postgres with the simulator (needs `bun run db:up`) |
+| `bun run --cwd apps/api hash-password '<pw>'` | generate `ADMIN_PASSWORD_HASH` |
+
+The stack is TypeScript throughout: NestJS 11, Prisma 6, PostgreSQL 16, Next.js 15, React 19, Tailwind 4 and Jest. Bun manages packages and Node 22 is the runtime.
 
 ## Acceptance criteria
 
-1. A customer can open the machine's QR URL on a phone.
-2. They can select multiple liquids and quantities.
-3. The backend validates and creates the order.
-4. Duplicate requests cannot cause duplicate dispensing.
-5. The mock controller dispenses the recipe sequentially.
-6. The customer sees accurate simulated progress and the final status.
-7. A machine cannot accept overlapping active orders.
-8. Simulated hardware faults are handled safely.
-9. An operator can configure liquids and calibrations.
-10. Automated tests cover critical ordering and safety logic.
-11. The system starts locally with documented commands.
-12. Real hardware integration stays disabled until the hardware is configured and tested.
+| # | Criterion | Status |
+|---|---|---|
+| 1 | Customer opens the QR URL on a phone | ✅ `/machine/[id]`, checked at 360 px with no horizontal overflow |
+| 2 | Selects several liquids and quantities | ✅ |
+| 3 | Backend validates and creates the order | ✅ strict DTOs, per-liquid and per-order limits, server-side pricing |
+| 4 | Duplicate requests can't cause a duplicate dispense | ✅ idempotency key, idempotent confirm, controller deduplication. Tested. |
+| 5 | Mock controller runs the recipe in sequence | ✅ tested |
+| 6 | Customer sees simulated progress and the final status | ✅ SSE through the web proxy |
+| 7 | No overlapping active orders | ✅ atomic reservation and partial unique index. Tested with concurrent requests. |
+| 8 | Simulated faults handled safely | ✅ pump fault, lost ACK, missing completion, disconnect, e-stop and scale faults are all tested |
+| 9 | Operator configures liquids and calibration | ✅ admin UI and API. Tested. |
+| 10 | Automated tests cover ordering and safety logic | ✅ 172 tests ([map](docs/testing.md)) |
+| 11 | Starts locally with documented commands | ✅ [Getting started](docs/getting-started.md) |
+| 12 | Real hardware stays disabled until configured | ✅ needs `HARDWARE_MODE=esp32`, `ENABLE_ESP32_ADAPTER=true` and `mqtts://` |
 
-## Compliance notice
+## Safety and compliance
 
-This machine may eventually dispense alcoholic beverages. The software does **not** provide alcohol licensing, age verification, payment compliance, food-contact safety, or operational compliance. Any real deployment needs a review of the local laws and regulations that apply.
+This software controls a **physical** device. The software limits are a second layer of protection; they don't replace the physical safety design. These are required:
+
+- a hard-wired emergency stop that cuts motor power
+- motor power kept separate from the logic supply, with fusing
+- pump drivers that hold the pumps off while the controller is booting or resetting
+
+[docs/safety.md](docs/safety.md) covers all of this.
+
+The machine may eventually dispense alcohol. **The software doesn't make a deployment compliant with alcohol licensing, age verification, payment, food-contact or electrical-safety rules.** Each deployment needs its own review against local law. `TEST_MODE` and `PAYMENT_DISABLED` take no real payment, and the API refuses to start in production in either mode without an explicit override.
