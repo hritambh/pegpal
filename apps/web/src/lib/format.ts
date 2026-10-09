@@ -2,6 +2,8 @@
 
 const MICRO_DECIMALS = 6;
 const MICRO = 10 ** MICRO_DECIMALS;
+/** Indian locale: ₹ symbol and lakh/crore digit grouping (₹1,23,456.00). */
+const LOCALE = 'en-IN';
 
 /** Parses a non-negative decimal string such as "0.0500" into integer micro-units. Returns null when malformed. */
 export function parseDecimalToMicros(value: string): number | null {
@@ -39,7 +41,7 @@ export function formatMoney(amount: string, currency: string): string {
   const n = Number(amount);
   if (!Number.isFinite(n)) return `${amount} ${currency}`;
   try {
-    return new Intl.NumberFormat('en', { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+    return new Intl.NumberFormat(LOCALE, { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
   } catch {
     return `${n.toFixed(2)} ${currency}`;
   }
@@ -50,7 +52,7 @@ export function formatUnitPrice(pricePerMl: string, currency: string): string {
   const n = Number(pricePerMl);
   if (!Number.isFinite(n)) return `${pricePerMl} ${currency}/mL`;
   try {
-    return `${new Intl.NumberFormat('en', { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(n)}/mL`;
+    return `${new Intl.NumberFormat(LOCALE, { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(n)}/mL`;
   } catch {
     return `${pricePerMl} ${currency}/mL`;
   }

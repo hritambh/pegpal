@@ -189,7 +189,7 @@ describe('Recovery after backend restart', () => {
         status,
         totalVolumeMl: 20,
         totalPrice: new Prisma.Decimal('0.20'),
-        currency: 'USD',
+        currency: 'INR',
         idempotencyKey: `recovery-${status}`,
         requestHash: 'x',
         paymentMode: 'TEST_MODE',

@@ -31,7 +31,7 @@ export async function resetDatabase(): Promise<{ machineId: string; liquidIds: s
     await prisma.$executeRawUnsafe(
       'TRUNCATE "DispensingEvent","HardwareCommand","OrderItem","Order","CalibrationRun","MachineCredential","Liquid","Machine" CASCADE',
     );
-    const machine = await prisma.machine.create({ data: { publicId: MACHINE, name: 'Test Machine', currency: 'USD' } });
+    const machine = await prisma.machine.create({ data: { publicId: MACHINE, name: 'Test Machine', currency: 'INR' } });
     const liquidIds: string[] = [];
     for (const [channel, l] of TEST_LIQUIDS.entries()) {
       const row = await prisma.liquid.create({

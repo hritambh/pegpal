@@ -107,7 +107,8 @@ model Machine {
   hardwareConnection     HardwareConnection   @default(UNKNOWN)
   estopActive            Boolean              @default(false)
   faultReason            String?
-  currency               String               @default("USD")
+  /// ISO 4217 code used for all prices on this machine.
+  currency               String               @default("INR")
   /// Reservation: at most one active order or calibration run.
   activeOrderId          String?              @unique @db.Uuid
   activeCalibrationRunId String?              @unique @db.Uuid
